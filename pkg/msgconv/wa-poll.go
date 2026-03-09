@@ -52,19 +52,15 @@ func (mc *MessageConverter) convertPollCreationMessage(ctx context.Context, msg 
 			"org.matrix.msc1767.text": opt.GetOptionName(),
 		}
 	}
-	body := fmt.Sprintf("%s\n\n%s\n\n(This message is a poll. Please open WhatsApp to vote.)", msg.GetName(), strings.Join(optionsListText, "\n"))
-	formattedBody := fmt.Sprintf("<p>%s</p><ol>%s</ol><p>(This message is a poll. Please open WhatsApp to vote.)</p>", event.TextToHTML(msg.GetName()), strings.Join(optionsListHTML, ""))
+	body := fmt.Sprintf("%s\n\n%s\n\n(This message is a poll. Please vote using a Matrix client that supports polls.)", msg.GetName(), strings.Join(optionsListText, "\n"))
+	formattedBody := fmt.Sprintf("<p>%s</p><ol>%s</ol><p>(This message is a poll. Please vote using a Matrix client that supports polls.)</p>", event.TextToHTML(msg.GetName()), strings.Join(optionsListHTML, ""))
 	maxChoices := int(msg.GetSelectableOptionsCount())
 	if maxChoices <= 0 {
 		maxChoices = len(optionNames)
 	}
-	evtType := event.EventMessage
-	if mc.ExtEvPolls {
-		evtType = event.EventUnstablePollStart
-	}
 
 	return &bridgev2.ConvertedMessagePart{
-		Type: evtType,
+		Type: event.EventUnstablePollStart,
 		Content: &event.MessageEventContent{
 			Body:          body,
 			MsgType:       event.MsgText,
@@ -125,7 +121,12 @@ func KeyToMessageID(ctx context.Context, client *whatsmeow.Client, chat, sender 
 		if key.GetParticipant() != "" {
 			sender, err = types.ParseJID(key.GetParticipant())
 			if err != nil {
-				// TODO log somehow?
+				zerolog.Ctx(ctx).Warn().
+					Stringer("chat", chat).
+					Str("participant", key.GetParticipant()).
+					Any("key", key).
+					Err(err).
+					Msg("Failed to parse participant JID in message key")
 				return ""
 			}
 			if sender.Server == types.LegacyUserServer {
@@ -146,7 +147,7 @@ func KeyToMessageID(ctx context.Context, client *whatsmeow.Client, chat, sender 
 				Stringer("chat", chat).
 				Stringer("sender", sender).
 				Any("key", key).
-				Msg("Failed to get message ID from key")
+				Msg("Failed to get message ID from key: group message without participant")
 			return ""
 		}
 	}
@@ -172,16 +173,45 @@ var failedPollUpdatePart = &bridgev2.ConvertedMessagePart{
 
 func (mc *MessageConverter) convertPollUpdateMessage(ctx context.Context, info *types.MessageInfo, msg *waE2E.PollUpdateMessage) (*bridgev2.ConvertedMessagePart, *waE2E.ContextInfo) {
 	log := zerolog.Ctx(ctx)
-	pollMessageID := KeyToMessageID(ctx, getClient(ctx), info.Chat, info.Sender, msg.PollCreationMessageKey)
+	client := getClient(ctx)
+	pollMessageID := KeyToMessageID(ctx, client, info.Chat, info.Sender, msg.PollCreationMessageKey)
 	pollMessage, err := mc.Bridge.DB.Message.GetPartByID(ctx, getPortal(ctx).Receiver, pollMessageID, "")
 	if err != nil {
 		log.Err(err).Msg("Failed to get poll update target message")
 		return failedPollUpdatePart, nil
+	} else if pollMessage == nil {
+		log.Warn().
+			Str("computed_poll_msg_id", string(pollMessageID)).
+			Str("poll_key_id", msg.GetPollCreationMessageKey().GetID()).
+			Msg("Poll update target message not found in database; this may happen if the poll was created before the bridge was set up or if there is a LID/phone number mapping mismatch")
+		return failedPollUpdatePart, nil
 	}
-	vote, err := getClient(ctx).DecryptPollVote(ctx, &events.Message{
+	vote, err := client.DecryptPollVote(ctx, &events.Message{
 		Info:    *info,
 		Message: &waE2E.Message{PollUpdateMessage: msg},
 	})
+	if err != nil && !info.SenderAlt.IsEmpty() {
+		// rerouteWAMessage may have swapped Sender (LID→PN) and put the original LID in SenderAlt.
+		// The WA phone app uses its LID JID as the modification sender when encrypting poll votes in
+		// LID-addressed chats. Retry decryption with the original (pre-rerouting) sender to handle
+		// this LID/PN mismatch.
+		//
+		// Shallow-copying MessageInfo is safe here: we only overwrite Sender (a value type in
+		// MessageSource), and DecryptPollVote only reads Chat/Sender/IsFromMe — it never touches
+		// the pointer fields (VerifiedName, DeviceSentMeta).
+		altInfo := *info
+		altInfo.Sender = info.SenderAlt
+		if altVote, altErr := client.DecryptPollVote(ctx, &events.Message{
+			Info:    altInfo,
+			Message: &waE2E.Message{PollUpdateMessage: msg},
+		}); altErr == nil {
+			vote, err = altVote, nil
+		} else {
+			log.Debug().Err(altErr).
+				Stringer("sender_alt", info.SenderAlt).
+				Msg("Failed to decrypt vote message with SenderAlt as fallback")
+		}
+	}
 	if err != nil {
 		log.Err(err).Msg("Failed to decrypt vote message")
 		return failedPollUpdatePart, nil

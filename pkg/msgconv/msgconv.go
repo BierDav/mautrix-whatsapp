@@ -39,7 +39,6 @@ type MessageConverter struct {
 	HTMLParser            *format.HTMLParser
 	AnimatedStickerConfig AnimatedStickerConfig
 	FetchURLPreviews      bool
-	ExtEvPolls            bool
 	DisableViewOnce       bool
 	DirectMedia           bool
 	OldMediaSuffix        string
