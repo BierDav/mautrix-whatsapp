@@ -3,6 +3,8 @@
 * Bumped minimum Go version to 1.25.
 * Added automatic recovery for WhatsApp app state sync issues.
 * Fixed LID redirects for some non-message events.
+* Made polls always use MSC3381 event types for full bidirectional support.
+  The `extev_polls` config option is now deprecated and has no effect.
 
 # v26.01
 

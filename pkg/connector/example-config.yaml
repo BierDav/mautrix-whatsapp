@@ -49,7 +49,7 @@ whatsapp_thumbnail: false
 # and send it to WhatsApp? URL previews can always be sent using the `com.beeper.linkpreviews`
 # key in the event content even if this is disabled.
 url_previews: false
-# Should polls be sent using unstable MSC3381 event types?
+# Deprecated: polls are now always bridged using MSC3381 event types regardless of this setting.
 extev_polls: false
 # Should view-once messages be disabled entirely?
 disable_view_once: false
