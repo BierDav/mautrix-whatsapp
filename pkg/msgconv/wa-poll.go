@@ -121,7 +121,12 @@ func KeyToMessageID(ctx context.Context, client *whatsmeow.Client, chat, sender 
 		if key.GetParticipant() != "" {
 			sender, err = types.ParseJID(key.GetParticipant())
 			if err != nil {
-				// TODO log somehow?
+				zerolog.Ctx(ctx).Warn().
+					Stringer("chat", chat).
+					Str("participant", key.GetParticipant()).
+					Any("key", key).
+					Err(err).
+					Msg("Failed to parse participant JID in message key")
 				return ""
 			}
 			if sender.Server == types.LegacyUserServer {
@@ -142,7 +147,7 @@ func KeyToMessageID(ctx context.Context, client *whatsmeow.Client, chat, sender 
 				Stringer("chat", chat).
 				Stringer("sender", sender).
 				Any("key", key).
-				Msg("Failed to get message ID from key")
+				Msg("Failed to get message ID from key: group message without participant")
 			return ""
 		}
 	}
@@ -168,13 +173,20 @@ var failedPollUpdatePart = &bridgev2.ConvertedMessagePart{
 
 func (mc *MessageConverter) convertPollUpdateMessage(ctx context.Context, info *types.MessageInfo, msg *waE2E.PollUpdateMessage) (*bridgev2.ConvertedMessagePart, *waE2E.ContextInfo) {
 	log := zerolog.Ctx(ctx)
-	pollMessageID := KeyToMessageID(ctx, getClient(ctx), info.Chat, info.Sender, msg.PollCreationMessageKey)
+	client := getClient(ctx)
+	pollMessageID := KeyToMessageID(ctx, client, info.Chat, info.Sender, msg.PollCreationMessageKey)
 	pollMessage, err := mc.Bridge.DB.Message.GetPartByID(ctx, getPortal(ctx).Receiver, pollMessageID, "")
 	if err != nil {
 		log.Err(err).Msg("Failed to get poll update target message")
 		return failedPollUpdatePart, nil
+	} else if pollMessage == nil {
+		log.Warn().
+			Str("computed_poll_msg_id", string(pollMessageID)).
+			Str("poll_key_id", msg.GetPollCreationMessageKey().GetID()).
+			Msg("Poll update target message not found in database; this may happen if the poll was created before the bridge was set up or if there is a LID/phone number mapping mismatch")
+		return failedPollUpdatePart, nil
 	}
-	vote, err := getClient(ctx).DecryptPollVote(ctx, &events.Message{
+	vote, err := client.DecryptPollVote(ctx, &events.Message{
 		Info:    *info,
 		Message: &waE2E.Message{PollUpdateMessage: msg},
 	})
