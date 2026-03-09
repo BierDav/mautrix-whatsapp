@@ -190,6 +190,28 @@ func (mc *MessageConverter) convertPollUpdateMessage(ctx context.Context, info *
 		Info:    *info,
 		Message: &waE2E.Message{PollUpdateMessage: msg},
 	})
+	if err != nil && !info.SenderAlt.IsEmpty() {
+		// rerouteWAMessage may have swapped Sender (LID→PN) and put the original LID in SenderAlt.
+		// The WA phone app uses its LID JID as the modification sender when encrypting poll votes in
+		// LID-addressed chats. Retry decryption with the original (pre-rerouting) sender to handle
+		// this LID/PN mismatch.
+		//
+		// Shallow-copying MessageInfo is safe here: we only overwrite Sender (a value type in
+		// MessageSource), and DecryptPollVote only reads Chat/Sender/IsFromMe — it never touches
+		// the pointer fields (VerifiedName, DeviceSentMeta).
+		altInfo := *info
+		altInfo.Sender = info.SenderAlt
+		if altVote, altErr := client.DecryptPollVote(ctx, &events.Message{
+			Info:    altInfo,
+			Message: &waE2E.Message{PollUpdateMessage: msg},
+		}); altErr == nil {
+			vote, err = altVote, nil
+		} else {
+			log.Debug().Err(altErr).
+				Stringer("sender_alt", info.SenderAlt).
+				Msg("Failed to decrypt vote message with SenderAlt as fallback")
+		}
+	}
 	if err != nil {
 		log.Err(err).Msg("Failed to decrypt vote message")
 		return failedPollUpdatePart, nil
